@@ -27,6 +27,7 @@ there.
 
 - `⌃⌥⌘/` opens the searchable shortcut sheet.
 - `⌃⌥⌘.` shows the local usage summary.
+- `⌥O` opens the remote Linux desktop through its SSH tunnel.
 - `⌥⌘H` reloads Hammerspoon.
 - `⌃⌥⌘` plus arrows or `U/I/J/K` tiles the current window.
 

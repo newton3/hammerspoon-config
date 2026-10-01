@@ -24,7 +24,7 @@ return {
   { id = "app_logic",    mods = {"alt"}, key = "l", desc = "Logic Pro",         cat = "Apps", action = app("/Applications/Logic Pro.app") },
   { id = "app_notes",    mods = {"alt","cmd"}, key = "n", desc = "Apple Notes", cat = "Apps", action = app("/System/Applications/Notes.app") },
   { id = "app_onenote",  mods = {"alt"}, key = "n", desc = "Microsoft OneNote", cat = "Apps", action = app("/Applications/Microsoft OneNote.app") },
-  { id = "app_outlook",  mods = {"alt"}, key = "o", desc = "Outlook",           cat = "Apps", action = pwa("Outlook (PWA)") },
+  { id = "app_outlook",  mods = {"alt","shift"}, key = "o", desc = "Outlook", cat = "Apps", action = pwa("Outlook (PWA)") },
   { id = "app_music",    mods = {"alt"}, key = "p", desc = "Music",             cat = "Apps", action = app("/System/Applications/Music.app") },
   { id = "app_windows",  mods = {"alt"}, key = "r", desc = "Windows App",       cat = "Apps", action = app("/Applications/Windows App.app") },
   { id = "app_safari",   mods = {"alt"}, key = "s", desc = "Safari",            cat = "Apps", action = app("/Applications/Safari.app") },
@@ -42,7 +42,7 @@ return {
   { id = "dev_edit_hs", mods = {"alt"}, key = "h", desc = "Edit Hammerspoon config", cat = "Dev", action = fn(dev.exec("open -a 'Visual Studio Code' ~/.hammerspoon")) },
   { id = "dev_reload", mods = {"alt","cmd"}, key = "h", desc = "Reload Hammerspoon", cat = "Dev", action = fn(dev.reload) },
   { id = "dev_remote_ssh", mods = {"alt","cmd","shift"}, key = "s", desc = "Remote Linux: SSH", cat = "Dev", action = fn(dev.remoteSSH) },
-  { id = "dev_remote_vnc", mods = {"alt","cmd","shift"}, key = "v", desc = "Remote Linux: Screen Sharing", cat = "Dev", action = fn(dev.remoteDesktop) },
+  { id = "dev_remote_vnc", mods = {"alt"}, key = "o", desc = "Remote Linux: Screen Sharing", cat = "Dev", action = fn(dev.remoteDesktop) },
 
   -- Text helpers
   { id = "text_lookup", mods = {"alt","ctrl"}, key = "l", desc = "Dictionary lookup selection", cat = "Text", action = fn(dev.getSelectedText) },
