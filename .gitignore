@@ -1,0 +1,14 @@
+# Private, machine-specific configuration
+/local_config/
+
+# Runtime telemetry and generated reports
+/usage/
+
+# Optional third-party Spoons are managed separately
+/Spoons/
+
+# Local artifacts
+.DS_Store
+**/.DS_Store
+*.log
+*.tmp

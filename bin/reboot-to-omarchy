@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+self=$0
+while [ -L "$self" ]; do
+  directory=$(CDPATH= cd -P -- "$(dirname -- "$self")" && pwd)
+  self=$(readlink "$self")
+  case $self in /*) ;; *) self=$directory/$self ;; esac
+done
+root=$(CDPATH= cd -P -- "$(dirname -- "$self")/.." && pwd)
+exec "$root/tools/reboot-remote" omarchy "$@"

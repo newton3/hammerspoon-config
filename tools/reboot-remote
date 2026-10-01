@@ -1,0 +1,211 @@
+#!/bin/zsh
+# Safe backend for reboot-to-windows and reboot-to-omarchy.
+# Dry-run is the default. Live use always performs preflight checks first.
+
+emulate -L zsh
+setopt pipefail no_unset
+
+readonly ROOT_DIR=${0:A:h:h}
+readonly CONFIG_FILE=${BOOT_REMOTE_CONFIG:-"$ROOT_DIR/local_config/boot_remote.conf"}
+
+usage() {
+  cat <<'EOF'
+Usage: reboot-remote <windows|omarchy> [--dry-run|--check|--execute]
+
+  --dry-run  Verify SSH and privileges, then print the exact live command.
+             This never changes boot state or requests a reboot. First SSH
+             contact may add the remote host key to ~/.ssh/known_hosts.
+  --check    Verify SSH and required privileges only.
+  --execute  Show the command, ask for confirmation, write nextboot.cfg,
+             and reboot the remote machine.
+EOF
+}
+
+die() {
+  print -u2 -- "ERROR: $*"
+  exit 1
+}
+
+[[ -r "$CONFIG_FILE" ]] || die "Missing $CONFIG_FILE (copy examples/local_config/boot_remote.conf)."
+
+# This is a user-owned, private file under local_config/. It deliberately uses
+# shell assignment syntax so the CLI and Hammerspoon share one source of truth.
+source "$CONFIG_FILE"
+
+: ${OMARCHY_SSH_TARGET:=""}
+: ${WINDOWS_SSH_TARGET:=""}
+: ${GRUB_WINDOWS_ENTRY:=""}
+: ${GRUB_OMARCHY_ENTRY:=""}
+: ${EFI_OVERRIDE_PATH:="/boot/efi/nextboot.cfg"}
+: ${WINDOWS_EFI_DRIVE:="S"}
+: ${SSH_CONNECT_TIMEOUT:="7"}
+
+[[ $# -ge 1 ]] || { usage; exit 2; }
+destination=$1
+shift
+
+mode=dry-run
+if [[ $# -gt 0 ]]; then
+  case $1 in
+    --dry-run) mode=dry-run ;;
+    --check) mode=check ;;
+    --execute) mode=execute ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage; die "Unknown option: $1" ;;
+  esac
+  shift
+fi
+[[ $# -eq 0 ]] || { usage; die "Unexpected arguments: $*"; }
+[[ $destination == windows || $destination == omarchy ]] || { usage; die "Destination must be windows or omarchy."; }
+
+[[ $SSH_CONNECT_TIMEOUT == <-> ]] || die "SSH_CONNECT_TIMEOUT must be an integer."
+[[ $WINDOWS_EFI_DRIVE == [A-Za-z] ]] || die "WINDOWS_EFI_DRIVE must be one letter."
+WINDOWS_EFI_DRIVE=${(U)WINDOWS_EFI_DRIVE}
+
+typeset -a ssh_base
+ssh_base=(
+  /usr/bin/ssh
+  -o "ConnectTimeout=$SSH_CONNECT_TIMEOUT"
+  -o ConnectionAttempts=1
+  -o StrictHostKeyChecking=accept-new
+)
+
+print_argv() {
+  local arg
+  for arg in "$@"; do printf '%q ' "$arg"; done
+  printf '\n'
+}
+
+missing_setting() {
+  [[ -n ${(P)1} ]] || die "Set $1 in $CONFIG_FILE."
+}
+
+validate_entry() {
+  local name=$1 value=$2
+  [[ $value != *$'\n'* && $value != *$'\r'* ]] || die "$name cannot contain a newline."
+  [[ $value != *'"'* ]] || die "$name cannot contain a double quote."
+}
+
+typeset omarchy_tty=-tt
+typeset omarchy_sudo_summary="not checked"
+
+check_omarchy() {
+  missing_setting OMARCHY_SSH_TARGET
+  print -- "Checking Omarchy SSH: $OMARCHY_SSH_TARGET"
+
+  local identity
+  if ! identity=$("${ssh_base[@]}" -o BatchMode=yes "$OMARCHY_SSH_TARGET" \
+      'test "$(uname -s)" = Linux && printf "omarchy-ssh=ok\n"' 2>&1); then
+    print -u2 -- "$identity"
+    print -u2 -- "Omarchy SSH is unavailable. Confirm the host is booted, SSH Server is running, and key-based login works."
+    return 1
+  fi
+  print -- "$identity"
+
+  local privilege
+  if ! privilege=$("${ssh_base[@]}" -o BatchMode=yes "$OMARCHY_SSH_TARGET" \
+      "tee_ok=no; reboot_ok=no; sudo -n -l -- /usr/bin/tee ${(q)EFI_OVERRIDE_PATH} >/dev/null 2>&1 && tee_ok=yes; sudo -n -l -- /usr/bin/systemctl reboot >/dev/null 2>&1 && reboot_ok=yes; printf 'sudo-tee=%s\\nsudo-reboot=%s\\n' \"\$tee_ok\" \"\$reboot_ok\"" 2>&1); then
+    print -u2 -- "$privilege"
+    print -u2 -- "SSH worked, but the remote sudo capability check failed."
+    return 1
+  fi
+  print -- "$privilege"
+
+  if [[ $privilege == *'sudo-tee=yes'* && $privilege == *'sudo-reboot=yes'* ]]; then
+    omarchy_tty=-T
+    omarchy_sudo_summary="passwordless sudo is available for tee and reboot"
+  else
+    omarchy_tty=-tt
+    omarchy_sudo_summary="a sudo password may be required; live mode will allocate a TTY"
+  fi
+  print -- "Omarchy preflight: $omarchy_sudo_summary."
+}
+
+check_windows() {
+  missing_setting WINDOWS_SSH_TARGET
+  print -- "Checking Windows SSH: $WINDOWS_SSH_TARGET"
+
+  local identity
+  if ! identity=$("${ssh_base[@]}" -o BatchMode=yes "$WINDOWS_SSH_TARGET" \
+      'ver >nul && echo windows-ssh=ok' 2>&1); then
+    print -u2 -- "$identity"
+    print -u2 -- "Windows SSH is unavailable. If OpenSSH Server is absent: Settings -> System -> Optional features -> View features -> OpenSSH Server -> Install. Then start 'OpenSSH SSH Server' and set it to Automatic in Services."
+    return 1
+  fi
+  print -- "$identity"
+
+  local admin
+  if ! admin=$("${ssh_base[@]}" -o BatchMode=yes "$WINDOWS_SSH_TARGET" \
+      'fltmc >nul 2>&1 && (echo windows-admin=yes) || (echo windows-admin=no & exit /b 3)' 2>&1); then
+    print -u2 -- "$admin"
+    print -u2 -- "Windows SSH works, but its cmd session is not elevated. mountvol /S requires an administrator-level session; use an Administrators-group SSH account and verify that OpenSSH grants it a high-integrity token."
+    return 1
+  fi
+  print -- "$admin"
+}
+
+omarchy_remote_command() {
+  local payload
+  payload=$(printf 'set default="%s"\n' "$GRUB_WINDOWS_ENTRY" | /usr/bin/base64 | /usr/bin/tr -d '\n')
+  printf "printf '%%s' '%s' | /usr/bin/base64 -d | sudo /usr/bin/tee %q >/dev/null && sudo /usr/bin/systemctl reboot" \
+    "$payload" "$EFI_OVERRIDE_PATH"
+}
+
+cmd_escape_echo() {
+  # Escape cmd.exe metacharacters so echo writes the literal GRUB entry.
+  /usr/bin/sed 's/[\^&|<>()]/^&/g' <<<"$1" | /usr/bin/tr -d '\n'
+}
+
+windows_remote_command() {
+  local escaped
+  escaped=$(cmd_escape_echo "$GRUB_OMARCHY_ENTRY")
+  printf 'mountvol %s: /S && >%s:\\nextboot.cfg echo set default=^"%s^" && mountvol %s: /D && shutdown /r /t 0' \
+    "$WINDOWS_EFI_DRIVE" "$WINDOWS_EFI_DRIVE" "$escaped" "$WINDOWS_EFI_DRIVE"
+}
+
+print_live_command() {
+  local remote
+  print -- "Exact live command:"
+  if [[ $destination == windows ]]; then
+    remote=$(omarchy_remote_command)
+    print_argv "${ssh_base[@]}" "$omarchy_tty" "$OMARCHY_SSH_TARGET" "$remote"
+    print -- "Sudo behavior: $omarchy_sudo_summary."
+  else
+    remote=$(windows_remote_command)
+    print_argv "${ssh_base[@]}" -T "$WINDOWS_SSH_TARGET" "$remote"
+  fi
+}
+
+if [[ $destination == windows ]]; then
+  missing_setting OMARCHY_SSH_TARGET
+  missing_setting GRUB_WINDOWS_ENTRY
+  validate_entry GRUB_WINDOWS_ENTRY "$GRUB_WINDOWS_ENTRY"
+  check_omarchy || exit 1
+else
+  missing_setting WINDOWS_SSH_TARGET
+  missing_setting GRUB_OMARCHY_ENTRY
+  validate_entry GRUB_OMARCHY_ENTRY "$GRUB_OMARCHY_ENTRY"
+  [[ $GRUB_OMARCHY_ENTRY != *[%\!]* ]] || die "GRUB_OMARCHY_ENTRY cannot contain % or ! because cmd.exe would expand it."
+  check_windows || exit 1
+fi
+
+[[ $mode == check ]] && exit 0
+print_live_command
+
+if [[ $mode == dry-run ]]; then
+  print -- "DRY RUN ONLY: nextboot.cfg was not changed and no reboot was requested."
+  exit 0
+fi
+
+[[ -t 0 ]] || die "Live mode needs an interactive terminal for confirmation and possible password prompts."
+printf 'Type %s to approve this reboot: ' "$destination"
+IFS= read -r confirmation
+[[ $confirmation == "$destination" ]] || die "Cancelled."
+
+if [[ $destination == windows ]]; then
+  remote=$(omarchy_remote_command)
+  exec "${ssh_base[@]}" "$omarchy_tty" "$OMARCHY_SSH_TARGET" "$remote"
+else
+  remote=$(windows_remote_command)
+  exec "${ssh_base[@]}" -T "$WINDOWS_SSH_TARGET" "$remote"
+fi
